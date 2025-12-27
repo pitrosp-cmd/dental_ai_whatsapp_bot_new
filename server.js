@@ -1,111 +1,87 @@
 import express from "express";
-import axios from "axios";
 import bodyParser from "body-parser";
+import sqlite3 from "sqlite3";
 import dotenv from "dotenv";
-import { chatAI, evaluate } from "./ai-engine.js";
-import { saveSession } from "./database.js";
-dotenv.config();
+import axios from "axios";
 
+dotenv.config();
 const app = express();
 app.use(bodyParser.json());
 
-/*
-  sessions[id] = [
-    {role:"system", content:"..."}, 
-    {role:"user", content:text}, 
-    {role:"assistant", content:response}
-  ]
-*/
-const sessions = {};
-
-// WhatsApp webhook verification
-app.get("/webhook", (req,res)=>{
-  if(req.query["hub.verify_token"] === process.env.VERIFY_TOKEN)
-    return res.send(req.query["hub.challenge"]);
-  res.status(403).send("Invalid verification token");
+// ---------------- DB -----------------
+const db = new sqlite3.Database("./messages.db", (err) => {
+    if (err) console.error("DB error:", err);
+    else console.log("SQLite database connected.");
 });
 
-// Handle received messages
-app.post("/webhook", async(req,res)=>{
-  const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-  if(!msg){ return res.sendStatus(200); }
+db.run(`
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_number TEXT,
+        message TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+`);
 
-  const id = msg.from;
-  const text = msg.text?.body;
+// ----------- WHATSAPP VERIFY -----------
+app.get("/webhook", (req, res) => {
+    const verify_token = process.env.VERIFY_TOKEN;
 
-  if (!sessions[id]) {
-    sessions[id] = [
-      {
-        role:"system",
-        content:`You are a friendly Greek-speaking dental assistant chatbot. 
-        Goal: Build rapport, learn background naturally. 
-        You subtly ask about dental habits, missing teeth, aesthetic concerns, fear, and interest level. 
-        If user expresses interest → smoothly introduce implants/solutions.
-        DO NOT end conversation too fast.
-        
-        End conversation ONLY when user seems satisfied or has learned enough.
-        At the final message include "#finished" at the END of your message (never at the start).`
-      }
-    ];
-  }
+    const mode = req.query["hub.mode"];
+    const token = req.query["hub.verify_token"];
+    const challenge = req.query["hub.challenge"];
 
-  sessions[id].push({role:"user", content:text});
-
-  const response = await chatAI(sessions[id]);
-  sessions[id].push({role:"assistant", content:response});
-
-  await sendMessage(id,response);
-
-  // Check if session should close
-  if(response.includes("#finished")){
-    const notes = sessions[id].map(x=>x.content).join(" ");
-    const score = evaluate(notes);
-    await notifyDentist(id,notes,score);
-    saveSession(id,notes,score);
-    delete sessions[id];
-  }
-
-  res.sendStatus(200);
+    if (mode === "subscribe" && token === verify_token) {
+        console.log("Webhook verified successfully!");
+        res.status(200).send(challenge);
+    } else {
+        res.sendStatus(403);
+    }
 });
 
-// Send message to WhatsApp
-async function sendMessage(to,text){
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    { messaging_product:"whatsapp", to, text:{body:text} },
-    { headers:{Authorization:`Bearer ${process.env.WHATSAPP_TOKEN}`}}
-  );
+// ----------- RECEIVE MESSAGES ----------
+app.post("/webhook", async (req, res) => {
+    try {
+        const entry = req.body.entry?.[0]?.changes?.[0]?.value;
+        const message = entry?.messages?.[0];
+
+        if (message) {
+            const from = message.from;
+            const text = message.text?.body;
+
+            console.log("📩 Received:", text, "from", from);
+
+            // Store to DB
+            db.run(`INSERT INTO messages (from_number, message) VALUES (?, ?)`, [from, text]);
+
+            // AUTO REPLY (test)
+            await sendWhatsAppMessage(from, "Your message was received: " + text);
+        }
+
+        res.sendStatus(200);
+    } catch (err) {
+        console.error("Error handling webhook →", err);
+        res.sendStatus(500);
+    }
+});
+
+// -------- SEND MESSAGE FUNCTION --------
+async function sendWhatsAppMessage(to, text) {
+    return axios({
+        method: "POST",
+        url: `https://graph.facebook.com/v19.0/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`,
+        headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+            "Content-Type": "application/json"
+        },
+        data: {
+            messaging_product: "whatsapp",
+            to,
+            text: { body: text }
+        }
+    });
 }
 
-// Report to dentist
-async function notifyDentist(user,notes,score){
-
-  const shortNotes = notes.substring(0,500);
-
-  const report = `🦷 *AI Patient Report*
-
-👤 Ασθενής: ${user}
-
-📄 Συνοπτικά:
-${shortNotes}...
-
-📊 Ενδιαφέρον για θεραπεία: *${score}/100*
-
-💡 Ερμηνεία:
-${score>70 ? "Υψηλή πιθανότητα ενδιαφέροντος για εμφύτευμα — μίλησε για πλεονεκτήματα & μονιμότητα."
-: score>40 ? "Μέτριο ενδιαφέρον — δείξε επιλογές, εξήγησε απλά, μην πιέσεις."
-: "Χαμηλή πρόθεση — πρώτα κτίσε εμπιστοσύνη."}
-
-──────────────────────
-📌 Συστάσεις ομιλίας στον ασθενή:
-${score>60 ? 
-"Εστίασε στη διάρκεια, φυσική αίσθηση και αυτοπεποίθηση που προσφέρουν τα εμφυτεύματα."
-:
-"Ρώτησέ τον για προσδοκίες, φόβους ή απορίες. Σταδιακή ενημέρωση."}
-`;
-
-  const doctorNumber = process.env.DOCTOR_NUMBER; // example: 35799123456
-  await sendMessage(doctorNumber,report);
-}
-
-app.listen(3000,()=>console.log("🚀 Dental AI WhatsApp Bot Running on PORT 3000"));
+// -------------- SERVER -----------------
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("🚀 Server running on port " + PORT));
