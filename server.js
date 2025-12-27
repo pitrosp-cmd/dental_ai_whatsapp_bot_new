@@ -1,27 +1,11 @@
 import express from "express";
 import bodyParser from "body-parser";
-import sqlite3 from "sqlite3";
 import dotenv from "dotenv";
 import axios from "axios";
 
 dotenv.config();
 const app = express();
 app.use(bodyParser.json());
-
-// ---------------- DB -----------------
-const db = new sqlite3.Database("./messages.db", (err) => {
-    if (err) console.error("DB error:", err);
-    else console.log("SQLite database connected.");
-});
-
-db.run(`
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        from_number TEXT,
-        message TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-`);
 
 // ----------- WHATSAPP VERIFY -----------
 app.get("/webhook", (req, res) => {
@@ -51,11 +35,8 @@ app.post("/webhook", async (req, res) => {
 
             console.log("📩 Received:", text, "from", from);
 
-            // Store to DB
-            db.run(`INSERT INTO messages (from_number, message) VALUES (?, ?)`, [from, text]);
-
-            // AUTO REPLY (test)
-            await sendWhatsAppMessage(from, "Your message was received: " + text);
+            // AUTO-REPLY FOR NOW (later we insert AI)
+            await sendWhatsAppMessage(from, "🦷 Dental Bot: Καλησπέρα! Λάβαμε το μήνυμά σας 🙂\nΑπαντώ με AI μόλις ολοκληρώσουμε webhook setup.");
         }
 
         res.sendStatus(200);
